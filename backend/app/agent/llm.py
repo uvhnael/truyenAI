@@ -57,6 +57,8 @@ class LLM:
                             "model": settings.llm_model,
                             "messages": messages,
                             "response_format": {"type": "json_object"},
+                            # 9router mặc định trả SSE dù không yêu cầu; ép JSON thuần.
+                            "stream": False,
                             "max_tokens": settings.llm_max_tokens,
                             "temperature": 0.7 if task in ("write", "revise") else 0.2,
                         },
