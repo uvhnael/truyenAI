@@ -104,7 +104,8 @@ class API:
                 line = raw.decode("utf-8").rstrip("\r\n")
                 if not line:
                     if data:
-                        require(event_id is not None, "SSE event lacks cursor ID")
+                        if event_id is None:
+                            raise CheckFailed("SSE event lacks cursor ID")
                         return {"id": int(event_id), "data": json.loads("\n".join(data))}
                     event_id, data = None, []
                 elif line.startswith("id:"):
