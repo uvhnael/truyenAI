@@ -2,6 +2,8 @@
 
 Only the worker owns the PostgreSQL advisory execution lock. Every write is also
 fenced by job.generation, so cancellation/retry cannot accept stale LLM results.
+
+Pause stages: analyze, outline, bible, write:N
 """
 
 from sqlalchemy import select
@@ -101,6 +103,29 @@ class StoryAgent:
         self.generation = generation
         self.llm = llm or LLM()
 
+    async def _check_pause(self, s, p, stage):
+        """Check if project is paused at this stage. Returns True if should pause."""
+        if p.pause_stage == stage:
+            p.status = f"paused_after_{stage}"
+            await s.flush()
+            return True
+        return False
+
+    async def _should_run_stage(self, s, p, stage):
+        """Check if stage should run (not already completed and not paused before it)."""
+        # Check if stage already has a checkpoint
+        existing = await s.scalar(select(Step).where(Step.job_id == p.id, Step.key == stage))
+        if existing:
+            return False
+        # Check if paused at an earlier stage
+        pause_order = ["analyze", "outline", "bible"]
+        if stage in pause_order and p.pause_stage:
+            pause_idx = pause_order.index(p.pause_stage)
+            stage_idx = pause_order.index(stage)
+            if pause_idx < stage_idx:
+                return False
+        return True
+
     async def step(self, key, task, context, apply=None):
         async with Session() as s, s.begin():
             p, job = await locked(s, self.project_id, self.generation)
@@ -124,104 +149,170 @@ class StoryAgent:
         return output
 
     async def run(self):
-        async def apply_spec(s, p, data):
-            # Explicit form options override prompt-derived values, never implicit UI defaults.
-            data.update(
-                {
+        # Check if we should resume from a specific chapter
+        async with Session() as s:
+            p = await s.get(Project, self.project_id)
+            if not p:
+                return
+            start_chapter = p.next_chapter if p.pause_stage and p.pause_stage.startswith("write:") else 1
+        
+        # Check if auto mode is enabled (run all stages without pausing)
+        auto_mode = p.options.get("auto_mode", False)
+
+        # Stage 1: Analyze (create spec)
+        if await self._should_run_stage(*(await self._get_project_and_job())[:2], "analyze"):
+            async def apply_spec(s, p, data):
+                data.update({
                     k: v
                     for k, v in p.options.items()
                     if k in ("chapter_count", "target_words") and v is not None
-                }
-            )
-            p.spec = data
+                })
+                data["mode"] = p.options.get("mode") or settings.default_mode
+                if data["mode"] == "short":
+                    data["chapter_count"] = 1
+                p.spec = data
 
-        await self.step("analyze", "analyze", await context_for(self.project_id), apply_spec)
+            await self.step("analyze", "analyze", await context_for(self.project_id), apply_spec)
+            # Only pause if explicitly requested via pause_stage AND not in auto mode
+            async with Session() as s, s.begin():
+                p, job = await locked(s, self.project_id, self.generation)
+                if not auto_mode and p.pause_stage == "analyze" and await self._check_pause(s, p, "analyze"):
+                    return
 
-        async def apply_outline(s, p, data):
-            count = p.spec["chapter_count"]
-            if [c["chapter_number"] for c in data["chapters"]] != list(range(1, count + 1)):
-                raise ValueError("Outline phải có đúng số chương, đánh số liên tiếp từ 1.")
-            for item in data["chapters"]:
-                s.add(Outline(project_id=p.id, **item))
+        # Stage 2: Outline
+        if await self._should_run_stage(*(await self._get_project_and_job())[:2], "outline"):
+            async def apply_outline(s, p, data):
+                count = p.spec["chapter_count"]
+                if [c["chapter_number"] for c in data["chapters"]] != list(range(1, count + 1)):
+                    raise ValueError("Outline phải có đúng số chương, đánh số liên tiếp từ 1.")
+                for item in data["chapters"]:
+                    s.add(Outline(project_id=p.id, **item))
 
-        await self.step("outline", "outline", await context_for(self.project_id), apply_outline)
+            await self.step("outline", "outline", await context_for(self.project_id), apply_outline)
+            async with Session() as s, s.begin():
+                p, job = await locked(s, self.project_id, self.generation)
+                if not auto_mode and p.pause_stage == "outline" and await self._check_pause(s, p, "outline"):
+                    return
 
-        async def apply_bible(s, p, data):
-            p.bible = data
-            for c in data["characters"]:
-                s.add(Character(project_id=p.id, **c))
+        # Stage 3: Bible/Characters
+        if await self._should_run_stage(*(await self._get_project_and_job())[:2], "bible"):
+            async def apply_bible(s, p, data):
+                p.bible = data
+                for c in data["characters"]:
+                    s.add(Character(project_id=p.id, **c))
 
-        await self.step("bible", "bible", await context_for(self.project_id), apply_bible)
+            await self.step("bible", "bible", await context_for(self.project_id), apply_bible)
+            async with Session() as s, s.begin():
+                p, job = await locked(s, self.project_id, self.generation)
+                if not auto_mode and p.pause_stage == "bible" and await self._check_pause(s, p, "bible"):
+                    return
+
+        # Stage 4: Write chapters (starting from start_chapter)
         ctx = await context_for(self.project_id)
-        for n in range(1, ctx["spec"]["chapter_count"] + 1):
+        if not ctx or "spec" not in ctx:
+            return
+        chapter_count = ctx["spec"]["chapter_count"]
 
-            async def apply_draft(s, p, data, number=n):
-                o = await s.scalar(
-                    select(Outline).where(Outline.project_id == p.id, Outline.chapter_number == number)
-                )
-                c = Chapter(
-                    project_id=p.id,
-                    chapter_number=number,
-                    title=o.title,
-                    content="",
-                    summary="",
-                    memory={},
-                    version=0,
-                    word_count=0,
-                    status="draft",
-                )
-                s.add(c)
+        last_review = None
+        for n in range(start_chapter, chapter_count + 1):
+            # Update next_chapter for potential pause (only if pause was requested)
+            async with Session() as s, s.begin():
+                p, job = await locked(s, self.project_id, self.generation)
+                p.next_chapter = n
+                # Only set pause_stage for write if user explicitly requested pause at this chapter
+                if p.pause_stage and p.pause_stage.startswith("write:") and int(p.pause_stage.split(":")[1]) == n:
+                    pass  # Keep existing pause_stage
+                else:
+                    p.pause_stage = None  # Clear any auto-set pause_stage
                 await s.flush()
-                await save_revision(s, c, data["content"], "draft")
 
-            await self.step(f"write:{n}", "write", await context_for(self.project_id, n), apply_draft)
-            review = None
-            for r in range(settings.max_revision_rounds + 1):
-                ctx = await context_for(self.project_id, n)
-                ctx["round"] = r
-                review = await self.step(f"review:{n}:{r}", "review", ctx)
-                if review["verdict"] == "pass" and not any(
-                    i["severity"] == "major" for i in review["issues"]
-                ):
-                    break
-                if r < settings.max_revision_rounds:
-                    await self.revise(n, f"revise:{n}:{r}", review)
-            await self.remember(n, f"memory:{n}")
-            passed = review["verdict"] == "pass" and not any(
-                i["severity"] == "major" for i in review["issues"]
-            )
-            await self.settle_chapter(n, f"settle:{n}", passed)
-
-        # Whole-story pass can trigger bounded targeted repairs, followed by re-summarization
-        # and another global check. Unresolved issues remain visible, never silently passed.
-        report = None
-        for r in range(settings.max_revision_rounds + 1):
-            final_context = await context_for(self.project_id)
-            final_context["round"] = r
-            report = await self.step(f"final_review:{r}", "final_review", final_context)
-            if report["verdict"] == "pass" and not any(i["severity"] == "major" for i in report["issues"]):
-                break
-            if r == settings.max_revision_rounds:
-                break
-            count = (await context_for(self.project_id))["spec"]["chapter_count"]
-            numbers = sorted({i["chapter_number"] for i in report["issues"] if i["chapter_number"] <= count})
-            for n in numbers:
-                await self.revise(n, f"final_revise:{r}:{n}", report)
-                await self.remember(n, f"final_memory:{r}:{n}")
-                check_context = await context_for(self.project_id, n)
-                check_context["round"] = settings.max_revision_rounds
-                check_context["recheck"] = True
-
-                async def apply_recheck(s, p, data, number=n):
-                    chapter = await chapter_row(s, p.id, number)
-                    passed = data["verdict"] == "pass" and not any(
-                        issue["severity"] == "major" for issue in data["issues"]
+            if await self._should_run_stage(*(await self._get_project_and_job())[:2], f"write:{n}"):
+                async def apply_draft(s, p, data, number=n):
+                    o = await s.scalar(
+                        select(Outline).where(Outline.project_id == p.id, Outline.chapter_number == number)
                     )
-                    chapter.status = "final" if passed else "needs_review"
+                    c = Chapter(
+                        project_id=p.id,
+                        chapter_number=number,
+                        title=o.title,
+                        content="",
+                        summary="",
+                        memory={},
+                        version=0,
+                        word_count=0,
+                        status="draft",
+                    )
+                    s.add(c)
+                    await s.flush()
+                    await save_revision(s, c, data["content"], "draft")
 
-                await self.step(
-                    f"final_recheck:{r}:{n}", "review", check_context, apply_recheck
+                await self.step(f"write:{n}", "write", await context_for(self.project_id, n), apply_draft)
+
+                # Only pause after chapter if explicitly requested AND not in auto mode
+                async with Session() as s, s.begin():
+                    p, job = await locked(s, self.project_id, self.generation)
+                    if not auto_mode and p.pause_stage == f"write:{n}" and await self._check_pause(s, p, f"write:{n}"):
+                        return
+
+                # Continue with review/revision loop for this chapter
+                review = None
+                for r in range(settings.max_revision_rounds + 1):
+                    ctx = await context_for(self.project_id, n)
+                    ctx["round"] = r
+                    review = await self.step(f"review:{n}:{r}", "review", ctx)
+                    if review["verdict"] == "pass" and not any(
+                        i["severity"] == "major" for i in review["issues"]
+                    ):
+                        break
+                    if r < settings.max_revision_rounds:
+                        await self.revise(n, f"revise:{n}:{r}", review)
+                await self.remember(n, f"memory:{n}")
+                passed = review["verdict"] == "pass" and not any(
+                    i["severity"] == "major" for i in review["issues"]
                 )
+                await self.settle_chapter(n, f"settle:{n}", passed)
+                last_review = review
+
+        # Clear pause_stage and next_chapter when all chapters done
+        async with Session() as s, s.begin():
+            p, job = await locked(s, self.project_id, self.generation)
+            p.pause_stage = None
+            p.next_chapter = 1
+
+        # Whole-story final review (only if not short mode or has multiple chapters)
+        if chapter_count > 1 or ctx["spec"].get("mode") != "short":
+            report = None
+            for r in range(settings.max_revision_rounds + 1):
+                final_context = await context_for(self.project_id)
+                final_context["round"] = r
+                report = await self.step(f"final_review:{r}", "final_review", final_context)
+                if report["verdict"] == "pass" and not any(i["severity"] == "major" for i in report["issues"]):
+                    break
+                if r == settings.max_revision_rounds:
+                    break
+                count = (await context_for(self.project_id))["spec"]["chapter_count"]
+                numbers = sorted({i["chapter_number"] for i in report["issues"] if i["chapter_number"] <= count})
+                for n in numbers:
+                    await self.revise(n, f"final_revise:{r}:{n}", report)
+                    await self.remember(n, f"final_memory:{r}:{n}")
+                    check_context = await context_for(self.project_id, n)
+                    check_context["round"] = settings.max_revision_rounds
+                    check_context["recheck"] = True
+
+                    async def apply_recheck(s, p, data, number=n):
+                        chapter = await chapter_row(s, p.id, number)
+                        passed = data["verdict"] == "pass" and not any(
+                            issue["severity"] == "major" for issue in data["issues"]
+                        )
+                        chapter.status = "final" if passed else "needs_review"
+
+                    await self.step(
+                        f"final_recheck:{r}:{n}", "review", check_context, apply_recheck
+                    )
+        else:
+            # Short mode: use last chapter review as final
+            report = last_review if last_review else {"verdict": "pass", "issues": [], "notes": "Short mode complete"}
+
         async with Session() as s, s.begin():
             p, job = await locked(s, self.project_id, self.generation)
             unresolved = await s.scalar(
@@ -247,6 +338,11 @@ class StoryAgent:
                 review=report,
                 mode="mock" if settings.mock else "live",
             )
+
+    async def _get_project_and_job(self):
+        async with Session() as s, s.begin():
+            p, job = await locked(s, self.project_id, self.generation)
+            return s, p, job
 
     async def revise(self, n, key, review):
         ctx = await context_for(self.project_id, n)

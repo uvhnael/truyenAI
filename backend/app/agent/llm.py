@@ -15,7 +15,7 @@ Trả về duy nhất JSON theo schema. Không tiết lộ chain of thought. Kh�
 Ưu tiên yêu cầu cấu trúc/kết thúc của người dùng; không khẳng định sự nhất quán nếu có lỗi.
 """
 TASKS = {
-    "analyze": "Phân tích yêu cầu; trích số chương, số từ mục tiêu mỗi chương từ prompt; nếu không có dùng 5 chương/800 từ. options được điền rõ thì ưu tiên options. Xác định kết thúc cần đạt.",
+    "analyze": "Phân tích yêu cầu. Nếu mode=short: chapter_count PHẢI đúng bằng 1 (truyện ngắn trọn vẹn trong một chương, súc tích, có mở bài - thân bài - kết rõ). Nếu mode=long: trích số chương/số từ mục tiêu từ prompt, nếu không có dùng 5 chương/800 từ; options được điền rõ thì ưu tiên options. Xác định kết thúc cần đạt.",
     "outline": "Lập đúng số chương theo spec, đánh số liên tiếp từ 1. Xây tuyến truyện tăng tiến, cài và giải các nút thắt, kết thúc đúng spec.",
     "bible": "Tạo thế giới, luật bất biến, nhân vật có mục tiêu, tính cách, điểm yếu và cung phát triển; nhất quán outline.",
     "write": "Viết đầy đủ chương chapter hiện tại, khoảng spec.target_words từ (đếm theo khoảng trắng). Không viết tóm tắt thay nội dung. Kế thừa memory, character_states và open_threads của các chương trước, không lặp lại sự kiện. Chương cuối giải quyết kết thúc yêu cầu.",
@@ -113,6 +113,7 @@ def mock_response(task, ctx):
             "ending": "Nhân vật tìm được lời giải và trở về",
             "chapter_count": options.get("chapter_count") or 3,
             "target_words": options.get("target_words") or 800,
+            "mode": options.get("mode") or "long",
         }
     if task == "outline":
         count = ctx["spec"]["chapter_count"]
@@ -152,6 +153,7 @@ def mock_response(task, ctx):
             ],
         }
     if task in ("write", "revise"):
+        # Mock không phải truyện thật; đọc to bằng TTS cũng chỉ để kiểm tra plumbing.
         ending = n == ctx["spec"]["chapter_count"]
         content = f"[BẢN DEMO — dữ liệu cố định, không phải nội dung Gemini]\n\nChặng thứ {n}, An bước dọc con đường men sườn núi. Chiếc đèn trong tay lay nhẹ, hắt ánh sáng lên những phiến đá ướt sương. An nhớ lời bà: ánh sáng chỉ ở lại với người biết nói thật.\n\n"
         content += (

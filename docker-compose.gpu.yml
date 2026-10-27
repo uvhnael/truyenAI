@@ -1,0 +1,17 @@
+# Opt in: docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build worker
+services:
+  worker:
+    # torch ships GPU-capable CUDA wheels from PyPI; TTS_DEVICE=cuda just selects
+    # the compute device at runtime. Model weights download from HF on first use.
+    environment:
+      TTS_DEVICE: cuda
+      # The single exposed physical GPU has ordinal 0 inside this container.
+      TTS_GPU_DEVICE_ID: "0"
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${TTS_HOST_GPU_ID:-0}"]
+              capabilities: [gpu]

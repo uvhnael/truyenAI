@@ -10,6 +10,7 @@ class Spec(BaseModel):
     ending: str
     chapter_count: int = Field(ge=1, le=30)
     target_words: int = Field(ge=200, le=5000)
+    mode: Literal["short", "long"] = "long"
 
 
 class OutlineItem(BaseModel):

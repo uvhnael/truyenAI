@@ -33,6 +33,10 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    volumes:
+      - audio:/app/data/audio
+      - videos:/app/data/videos
+      - ./data/video-backgrounds:/app/data/video-backgrounds:ro
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://truyenai:truyenai@postgres:5432/truyenai
@@ -51,6 +55,11 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     command: arq app.worker.WorkerSettings
+    volumes:
+      - audio:/app/data/audio
+      - videos:/app/data/videos
+      - ./data/video-backgrounds:/app/data/video-backgrounds:ro
+      - ./backend/models:/app/models:ro
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://truyenai:truyenai@postgres:5432/truyenai
@@ -73,5 +82,7 @@ services:
       - api
 
 volumes:
+  videos:
+  audio:
   redisdata:
   pgdata:

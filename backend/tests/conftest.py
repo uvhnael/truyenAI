@@ -1,6 +1,7 @@
 """Shared fixtures: sqlite in-memory async engine, patched Session everywhere, HTTP client."""
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -13,6 +14,11 @@ from sqlalchemy.pool import StaticPool
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
+
+# Host .env may carry an invalid/legacy TTS_DEVICE=gpu; Settings.tts_device only allows
+# cpu|cuda. Env vars take priority over the .env file, so normalize before app import.
+if os.environ.get("TTS_DEVICE", "") not in ("cpu", "cuda"):
+    os.environ["TTS_DEVICE"] = "cpu"
 
 import app.db as db_module  # noqa: E402
 from app.models import Base  # noqa: E402

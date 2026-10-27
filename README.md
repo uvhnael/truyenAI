@@ -110,4 +110,41 @@ scripts/e2e.py                    kiểm thử HTTP qua stack thật
 
 Đây là dashboard admin đơn người dùng ở localhost, CHƯA có login/RBAC/multi-tenant. Không mở cổng công khai. Trước production cần authentication, TLS/reverse proxy, secrets manager, rate limiting, quota/cost tracking, backup/restore được kiểm chứng và pagination đầy đủ (danh sách hiện tối đa 500 project). Không có accounting token/chi phí hay vòng phê duyệt ngân sách. Hủy không hoàn lại chi phí request đang chạy. Nội dung truyện và prompt sẽ gửi đến LLM provider khi bật live.
 
-Agent không bảo đảm chất lượng văn học, dung lượng chính xác hoặc không còn lỗi; cần người đọc duyệt. Vòng sửa mặc định tối đa 2 cho mỗi chương và 2 vòng toàn truyện. Tác vụ arq có timeout 2 giờ; khi bị gián đoạn, bộ quét có thể giao lại và resume checkpoint. Chưa có upload tài liệu, RAG/vector DB, hình/audio hay xuất DOCX/PDF.
+Agent không bảo đảm chất lượng văn học, dung lượng chính xác hoặc không còn lỗi; cần người đọc duyệt. Vòng sửa mặc định tối đa 2 cho mỗi chương và 2 vòng toàn truyện. Tác vụ arq có timeout 2 giờ; khi bị gián đoạn, bộ quét có thể giao lại và resume checkpoint. Chưa có upload tài liệu, RAG/vector DB, hình, nhạc nền hay xuất DOCX/PDF.
+
+## Truyện ngắn / truyện dài và audio Kokoro-Vietnamese
+
+- Chọn **Truyện ngắn** khi tạo: backend ép đúng 1 chương, kể cả prompt/LLM yêu cầu nhiều chương. **Truyện dài** giữ nguyên suy luận/tùy chọn 1–30 chương. Project cũ vẫn giữ nguyên.
+- Kokoro-Vietnamese chạy bằng torch cục bộ (CPU hoặc CUDA), không gửi nội dung audio ra dịch vụ TTS ngoài. G2P tiếng Việt bằng `vig2p`. 9router chỉ dùng cho viết truyện.
+- Cài lần đầu: `make install && make tts-model`. Model + voicepack (~82M base) tải từ HuggingFace (`contextboxai/Kokoro-Vietnamese`) vào HF cache; `scripts/prepare_kokoro.py` tải sẵn và kiểm tra môi trường. Package được vendor sẵn ở `backend/kokoro_vietnamese/` (không phải dep pip).
+- `docker compose up -d --build`: MP3 lưu named volume `audio`, dùng chung API/worker. Không cần GPU. Host native cần ffmpeg; image Docker đã có.
+- Trong chương đã hoàn tất: lưu chỉnh sửa trước, chọn một trong **14 giọng tiếng Việt** (mặc định `diem_trinh`), bấm **Chuyển audio**. Theo dõi queued/processing/ready, nghe và tải MP3. Đổi giọng và tạo lại được. Không hỗ trợ clone giọng ở phiên bản này.
+- Audio gắn với version nội dung. Sửa chương sẽ đánh dấu audio cũ là stale và chặn tải nhầm; đang tổng hợp mà sửa thì kết quả cũ không được công bố.
+- Kokoro tự chia câu và khớp crossfade giữa đoạn trong một lời gọi; output 24 kHz PCM rồi mã hóa MP3, tránh giữ toàn truyện trong RAM. Nhẹ VRAM (~0.7 GB) và nhanh hơn nhiều so với ZeroTTS (dữ liệu benchmark: GPU RTF ~0.03, CPU RTF ~0.38).
+- Các tác vụ TTS được tuần tự hóa bằng PG advisory lock để không nạp/sử dụng model đồng thời. Một instance model được cache cho mỗi giọng (giới hạn 3 để giữ VRAM). Đây là TTS đơn giọng từng chương, chưa ghép sách/nhạc nền/đa giọng.
+- `GET /api/audio/voices`; `POST /api/projects/{id}/chapters/{n}/audio?voice=diem_trinh`; `GET .../audio/status`; `GET .../audio` hỗ trợ Range cho player.
+- Với DB v1/v2 sẵn có, migration v3 bổ sung generation/version/error cho audio. Tác vụ audio thử nghiệm cũ bị gián đoạn được đánh dấu failed và có thể retry.
+- `scripts/verify_audio.py` đọc một chương đã tồn tại, tạo audio Kokoro thật và kiểm tra tải MP3/HTTP Range, không gọi LLM. Truyền `AUDIO_PROJECT_ID` để chọn project của bạn. Test này tốn CPU/RAM hoặc GPU/VRAM, không chạy cùng nhiều tác vụ inference.
+
+### Video từ audio (FFmpeg)
+
+- Chương đã có audio sẵn sàng có thể render thành video MP4 nền: scale/pad về 1920x1080 (H.264 yuv420p + AAC, `-movflags +faststart`), dùng `-stream_loop -1` nền + `-shortest`, gắn với `audio_version`/`audio_generation`. Sửa chương hoặc tạo audio mới sẽ đánh dấu video cũ là stale và chặn tải nhầm; đang render mà input đổi thì kết quả cũ không được công bố.
+- Thư mục nền `data/video-backgrounds` (mount read-only vào API/worker) chứa file .mp4/.mov/.mkv/.webm 1080p. MP4 xuất ra named volume `videos`; host native cần ffmpeg (image Docker đã có).
+- API: `GET /api/video/backgrounds`; `POST /api/projects/{id}/chapters/{n}/video {background?}`; `GET .../video/status`; `GET .../video` (Range). Render chạy vụ worker với PG advisory lock và generation fence, như audio.
+- `scripts/verify_video.py` tạo thật một video từ chương đã có audio + nền testsrc (không gọi LLM), ffprobe xác nhận 1920x1080/AAC/duration≈audio, ghi file vào `.artifacts/chapter-video.mp4`.
+
+### Xuất bản TikTok / YouTube
+
+- Kết nối tài khoản qua OAuth: `GET /api/social/{platform}/authorize` (tiktok|youtube) trả URL; sau khi người dùng đồng ý, browser được redirect về `/publish?connected={platform}` hoặc `?error=...`. `DELETE /api/social/{platform}` ngắt kết nối; `GET /api/social/status` cho biết trạng thái.
+- Cần tạo TikTok app (Content Posting API, scopes `video.publish,user.info.basic`) và Google OAuth client (YouTube Data API v3, scopes `youtube.upload,youtube.readonly`) rồi điền `TIKTOK_CLIENT_KEY/SECRET`, `YOUTUBE_CLIENT_ID/SECRET`, `SOCIAL_REDIRECT_BASE` trong `.env`. Đăng bài LIVE đòi hỏi app TikTok được duyệt (audit); chưa duyệt thì chỉ kiểm thử bằng HTTP mock.
+- `POST /api/videos/{id}/publish` (caption/hashtags/privacy cho TikTok; title/description/tags/category_id/privacy/schedule_at cho YouTube), theo dõi `GET /api/publishes/{id}`, `POST /api/publishes/{id}/retry`. Upload chạy vụ worker, token được refresh tự động (YouTube), generation fence tránh đăng đè sau khi chỉnh sửa.
+- Dữ liệu tài khoản xã hội và lịch sử đăng nằm trong DB (`social_accounts`, `publishes`); không log token. Không có test live nếu chưa có app duyệt.
+
+### GPU NVIDIA (tùy chọn)
+
+- Đã kiểm tra CUDA trên RTX 2060 6GB (driver 595.84 / CUDA 13.2). TTS dùng torch (PyPI cấp wheel GPU-capable cu13), không cần onnxruntime-gpu riêng. Chỉ hỗ trợ `cpu` và `cuda`.
+- Bật GPU: `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build worker`. Các lần cập nhật worker sau cũng phải dùng cả hai file. API/Postgres/Redis không cần GPU.
+- Trở về CPU: `docker compose -f docker-compose.yml up -d --build --force-recreate worker` (để `TTS_DEVICE=cpu` hoặc không đặt trong .env).
+- CPU vẫn là mặc định. File GPU override đặt `TTS_DEVICE=cuda`; `TTS_HOST_GPU_ID=0` chọn GPU vật lý. Container chỉ thấy một GPU nên `TTS_GPU_DEVICE_ID=0` ở bên trong. Chạy native thì chỉ số này là chỉ số GPU của process.
+- Kokoro rất nhẹ VRAM (~0.7 GB); khi chưa có CUDA khả dụng thì tự rơi về CPU. Lỗi tải/thiếu model báo rõ, không tự gửi nội dung đi đâu.
+- Giữ một tác vụ TTS mỗi lần (PG advisory lock) và cache model giới hạn 3 giọng để tránh tràn VRAM. Không cam kết GPU luôn nhanh hơn cho mọi văn bản.
