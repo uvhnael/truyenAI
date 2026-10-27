@@ -16,3 +16,7 @@ __pycache__/
 backend/data/
 .artifacts/
 .hermes/
+backend/models/
+backend/data/
+/data/
+/backgrounds-staging/
