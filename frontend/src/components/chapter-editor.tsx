@@ -1,6 +1,8 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { api, ApiError, Chapter, dateLabel, errorMessage, Revision, statusLabel } from "@/lib/api";
+import ChapterAudio from "./chapter-audio";
+import ChapterVideo from "./chapter-video";
 
 export default function ChapterEditor({ projectId, chapters, busy, lockReason, onDirtyChange, onSaved }: { projectId: string; chapters: Chapter[]; busy: boolean; lockReason: string; onDirtyChange: (value: boolean) => void; onSaved: () => Promise<void> }) {
   const [selected, setSelected] = useState(chapters[0]?.chapter_number || 1);
@@ -40,6 +42,8 @@ export default function ChapterEditor({ projectId, chapters, busy, lockReason, o
   return <div className="chapter-layout"><aside className="chapter-list" aria-label="Danh sách chương"><div className="chapter-list-heading">BẢN THẢO <span>{chapters.length}</span></div>{chapters.map(c => <button key={c.chapter_number} className={selected === c.chapter_number ? "active" : ""} onClick={() => choose(c.chapter_number)} disabled={saving}><span className="chapter-number">{String(c.chapter_number).padStart(2, "0")}</span><span><strong>{c.title || `Chương ${c.chapter_number}`}</strong><small>{c.word_count || 0} từ · {statusLabel(c.status)}</small></span></button>)}</aside>
     <div className="editor-card">
       <div className="editor-toolbar"><span className="muted">Chương {selected} · Phiên bản {draft?.version ?? "—"}{dirty && <span className="unsaved"> · Chưa lưu</span>}</span><button className={`text-button ${showRevisions ? "accent" : ""}`} onClick={() => { setShowRevisions(!showRevisions); setRevision(null); }}>◷ {showRevisions ? "Đóng lịch sử" : "Lịch sử phiên bản"}</button></div>
+      {current && <ChapterAudio key={`${projectId}-${current.id}`} projectId={projectId} chapter={current} locked={busy} unsaved={dirty || saving} />}
+      {current && <ChapterVideo key={`${projectId}-${current.id}-video`} projectId={projectId} chapter={current} locked={busy} unsaved={dirty || saving} />}
       {busy && <div className="info-banner">{lockReason}</div>}
       {dirty && current && current.version !== draft?.version && <div className="warning-banner">Máy chủ có phiên bản mới hơn. Bản nháp chưa lưu của bạn vẫn được giữ nguyên.</div>}
       {error && <div className="error" role="alert">{error}<button className="text-button" disabled={saving} onClick={() => void reload()}>Tải bản mới nhất</button></div>}
